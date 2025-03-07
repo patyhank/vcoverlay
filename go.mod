@@ -4,6 +4,7 @@ go 1.23
 
 require (
 	github.com/fasthttp/websocket v1.5.12
+	github.com/fogleman/gg v1.3.0
 	github.com/go-viper/mapstructure/v2 v2.2.1
 	github.com/gonutz/w32/v2 v2.11.1
 	github.com/google/uuid v1.6.0
@@ -17,9 +18,11 @@ require (
 require (
 	github.com/andybalholm/brotli v1.1.1 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
+	github.com/golang/freetype v0.0.0-20170609003504-e2365dfdc4a0 // indirect
 	github.com/klauspost/compress v1.17.11 // indirect
 	github.com/savsgio/gotils v0.0.0-20240704082632-aef3928b8a38 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasthttp v1.58.0 // indirect
 	golang.org/x/net v0.33.0 // indirect
+	golang.org/x/text v0.21.0 // indirect
 )

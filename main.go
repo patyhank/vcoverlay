@@ -2,11 +2,11 @@ package main
 
 import (
 	"bytes"
+	_ "embed"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"github.com/fasthttp/websocket"
-	"github.com/go-viper/mapstructure/v2"
+	"github.com/golang/freetype/truetype"
 	"github.com/gonutz/w32/v2"
 	"github.com/google/uuid"
 	"github.com/rodrigocfd/windigo/ui"
@@ -14,19 +14,23 @@ import (
 	"github.com/rodrigocfd/windigo/win"
 	"github.com/rodrigocfd/windigo/win/co"
 	"github.com/shahfarhadreza/go-gdiplus"
-	draw2 "golang.org/x/image/draw"
+	xdraw "golang.org/x/image/draw"
+	"golang.org/x/image/font"
+	"golang.org/x/image/math/fixed"
 	"golang.org/x/sys/windows"
 	"image"
 	"image/color"
 	"image/draw"
 	"image/png"
 	"io"
+	"log"
+	"maps"
 	"math"
 	"net/http"
 	"os"
 	"runtime"
 	"slices"
-	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -34,72 +38,44 @@ import (
 	"unsafe"
 )
 
+//go:embed assets/deaf.png
+var deafData []byte
+
+//go:embed assets/mute.png
+var muteData []byte
+
+//go:embed assets/NotoSansTC.ttf
+var fontData []byte
+
 // --------------------------
 // 資料結構與全域變數
 // --------------------------
-
-type AuthorizeArgs struct {
-	ClientId string   `json:"client_id"`
-	Scopes   []string `json:"scopes"`
-}
-
-type Authorize struct {
-	Nonce         string `json:"nonce"`
-	Cmd           string `json:"cmd"`
-	AuthorizeArgs `json:"args"`
+var self struct {
+	ChannelID string
+	UserID    string
 }
 
 var apiURL = "https://api.overlayed.dev"
 var clientID = "905987126099836938"
-var selfID = ""
 
-type ChannelStates struct {
-	Id          string      `json:"id" mapstructure:"id"`
-	Name        string      `json:"name" mapstructure:"name"`
-	Type        int         `json:"type" mapstructure:"type"`
-	Bitrate     int         `json:"bitrate" mapstructure:"bitrate"`
-	UserLimit   int         `json:"user_limit" mapstructure:"user_limit"`
-	GuildId     string      `json:"guild_id" mapstructure:"guild_id"`
-	Position    int         `json:"position" mapstructure:"position"`
-	VoiceStates []UserState `json:"voice_states" mapstructure:"voice_states"`
-}
-type User struct {
-	Id            string `json:"id" mapstructure:"id"`
-	Username      string `json:"username" mapstructure:"username"`
-	Discriminator string `json:"discriminator" mapstructure:"discriminator"`
-	Avatar        string `json:"avatar" mapstructure:"avatar"`
-	Bot           bool   `json:"bot" mapstructure:"bot"`
-}
-type VoiceState struct {
-	Mute     bool `json:"mute" mapstructure:"mute"`
-	Deaf     bool `json:"deaf" mapstructure:"deaf"`
-	SelfMute bool `json:"self_mute" mapstructure:"self_mute"`
-	SelfDeaf bool `json:"self_deaf" mapstructure:"self_deaf"`
-	Suppress bool `json:"suppress" mapstructure:"suppress"`
-	Talking  bool `json:"-" mapstructure:"-"`
-}
-type UserState struct {
-	VoiceState VoiceState `json:"voice_state" mapstructure:"voice_state"`
-	User       User       `json:"user" mapstructure:"user"`
-	Nick       string     `json:"nick" mapstructure:"nick"`
-	Volume     int        `json:"volume" mapstructure:"volume"`
-	Mute       bool       `json:"mute" mapstructure:"mute"`
+var subs = []EventType{
+	EventSpeakingStart,
+	EventSpeakingStop,
+	EventVoiceStateCreate,
+	EventVoiceStateDelete,
+	EventVoiceStateUpdate,
 }
 
-var subs = []string{
-	"SPEAKING_START",
-	"SPEAKING_STOP",
-	"VOICE_STATE_CREATE",
-	"VOICE_STATE_DELETE",
-	"VOICE_STATE_UPDATE",
-}
-var currentChannel = ""
 var userMap = map[string]*UserState{}
 var userMapLock sync.Mutex
+
 var stateUpdated = make(chan time.Time, 16)
 
 // 為 DPI 縮放所用，全域縮放因子（預設 1.0 表示 96 DPI）
+// 為 DPI 縮放所用，全域縮放因子（預設 1.0 表示 96 DPI）
 var scale float64 = 1.0
+
+const messageDuration = 300
 
 // --------------------------
 // 主函式
@@ -112,206 +88,198 @@ func main() {
 		panic(err)
 	}
 	defer conn.Close()
-	fmt.Println(response)
+	if response.StatusCode != 101 {
+		fmt.Println(response)
+	}
 
-	file, err := os.ReadFile("token.txt")
-	var m = map[string]any{}
+	tokenData, err := os.ReadFile("token.txt")
 	go LoopImage() // 啟動圖片更新與繪製的 goroutine
 
 	for {
-		err := conn.ReadJSON(&m)
+		var payload MessagePayload
+		_, p, err := conn.ReadMessage()
 		if err != nil {
-			panic(err)
+			fmt.Println(err)
+			time.Sleep(5 * time.Second)
+			continue
 		}
 
-		var cmd string
-		var evt string
-		if cmdS, ok := m["cmd"]; ok && cmdS != nil {
-			cmd = cmdS.(string)
-		}
-		if evtS, ok := m["evt"]; ok && evtS != nil {
-			evt = evtS.(string)
+		err = json.Unmarshal(p, &payload)
+		if err != nil {
+			fmt.Println(err)
+			continue
 		}
 
-		switch cmd {
-		case "GET_SELECTED_VOICE_CHANNEL":
-			if currentChannel != "" {
-				for _, sub := range subs {
-					SUBSCRIBE := map[string]any{
-						"nonce": uuid.NewString(),
-						"evt":   sub,
-						"args": map[string]any{
-							"channel_id": currentChannel,
-						},
-						"cmd": "UNSUBSCRIBE",
-					}
-					conn.WriteJSON(SUBSCRIBE)
-				}
+		err = payload.Resolve()
+		if err != nil {
+			fmt.Println(err)
+			continue
+		}
 
-				currentChannel = ""
+		switch data := payload.ResolvedData.(type) {
+		case *ReadyInfo:
+			if tokenData == nil {
+				conn.WriteJSON(CmdRequest{
+					Args: AuthorizeArgs{
+						ClientId: clientID,
+						Scopes:   []string{"identify", "rpc"},
+					},
+					Cmd:   CommandAuthorize,
+					Nonce: uuid.NewString(),
+				})
+			} else {
+				conn.WriteJSON(CmdRequest{
+					Args: AuthenticateArgs{
+						AccessToken: string(tokenData),
+					},
+					Cmd:   CommandAuthenticate,
+					Nonce: uuid.NewString(),
+				})
 			}
-			var data ChannelStates
-			err := mapstructure.Decode(m["data"], &data)
-			currentChannel = data.Id
-			fmt.Println(err, "SELECTED_VOICE_CHANNEL", data)
+			log.Println("Ready as ", data.User.Username)
+		case *AuthenticatePayload:
+			if payload.Evt == "ERROR" {
+				conn.WriteJSON(CmdRequest{
+					Args: AuthorizeArgs{
+						ClientId: clientID,
+						Scopes:   []string{"identify", "rpc"},
+					},
+					Cmd:   CommandAuthorize,
+					Nonce: uuid.NewString(),
+				})
+				continue
+			}
+
+			self.UserID = data.User.Id
+			conn.WriteJSON(CmdRequest{
+				Cmd:   CommandSubscribe,
+				Evt:   EventVoiceChannelSelect,
+				Nonce: uuid.NewString(),
+			})
+
+			conn.WriteJSON(CmdRequest{
+				Nonce: uuid.NewString(),
+				Cmd:   CommandGetSelectedVoiceChannel,
+			})
+		case *AuthorizePayload:
+			token := RemoteLogin(data.Code)
+			os.WriteFile("token.txt", []byte(token), os.ModePerm)
+
+			conn.WriteJSON(CmdRequest{
+				Args: AuthenticateArgs{
+					AccessToken: token,
+				},
+				Cmd:   CommandAuthenticate,
+				Nonce: uuid.NewString(),
+			})
+		case *VoiceChannel:
+			if self.ChannelID != "" {
+				for _, sub := range subs {
+					conn.WriteJSON(CmdRequest{
+						Args: Args{
+							ChannelID: self.ChannelID,
+						},
+						Cmd:   CommandUnsubscribe,
+						Nonce: uuid.NewString(),
+						Evt:   sub,
+					})
+				}
+			}
+			if data.Id == "" {
+				continue
+			}
+
+			self.ChannelID = data.Id
+
 			userMapLock.Lock()
+			userMap = make(map[string]*UserState)
+
 			for _, vs := range data.VoiceStates {
 				userMap[vs.User.Id] = &vs
 			}
 			userMapLock.Unlock()
 
 			for _, sub := range subs {
-				SUBSCRIBE := map[string]any{
-					"nonce": uuid.NewString(),
-					"evt":   sub,
-					"args": map[string]any{
-						"channel_id": data.Id,
+				marshal, _ := json.Marshal(CmdRequest{
+					Args: Args{
+						ChannelID: data.Id,
 					},
-					"cmd": "SUBSCRIBE",
-				}
-				conn.WriteJSON(SUBSCRIBE)
-			}
-			NotifyUpdate()
-		case "AUTHENTICATE":
-			if evt == "ERROR" {
-				conn.WriteJSON(Authorize{
+					Cmd:   CommandSubscribe,
 					Nonce: uuid.NewString(),
-					Cmd:   "AUTHORIZE",
-					AuthorizeArgs: AuthorizeArgs{
-						ClientId: clientID,
-						Scopes:   []string{"identify", "rpc"},
-					},
+					Evt:   sub,
 				})
+				fmt.Println(string(marshal), data.Id)
+				conn.WriteJSON(CmdRequest{
+					Args: Args{
+						ChannelID: data.Id,
+					},
+					Cmd:   CommandSubscribe,
+					Nonce: uuid.NewString(),
+					Evt:   sub,
+				})
+			}
+		case *UserState:
+			if data.User.Id == "" {
 				continue
 			}
+			switch payload.Evt {
+			case EventVoiceStateDelete:
+				userMapLock.Lock()
+				userMap[data.User.Id].Left = true
+				userMap[data.User.Id].LeftTick = messageDuration
+				messageImg := getTextedImage(fmt.Sprintf("離開"))
+				userMap[data.User.Id].StateImage = messageImg
+				userMapLock.Unlock()
+				NotifyLongUpdate(data.User.Id)
+			case EventVoiceStateCreate:
+				userMapLock.Lock()
+				var internalState InternalState
+				if userMap[data.User.Id] != nil && userMap[data.User.Id].InternalState != EmptyInternalState {
+					internalState = userMap[data.User.Id].InternalState
+					internalState.LeftTick = 0
+					internalState.Left = false
+				}
+				userMap[data.User.Id] = data
+				userMap[data.User.Id].InternalState = internalState
+				userMap[data.User.Id].Joined = true
+				userMap[data.User.Id].JoinTick = messageDuration
 
-			data := m["data"].(map[string]any)
-			var user User
-			mapstructure.Decode(data["user"], &user)
-			selfID = user.Id
+				messageImg := getTextedImage(fmt.Sprintf("加入"))
+				userMap[data.User.Id].StateImage = messageImg
+				userMapLock.Unlock()
+				NotifyLongUpdate(data.User.Id)
+			case EventVoiceStateUpdate:
+				userMapLock.Lock()
+				var internalState InternalState
+				if userMap[data.User.Id] != nil && userMap[data.User.Id].InternalState != EmptyInternalState {
+					internalState = userMap[data.User.Id].InternalState
+				}
+				userMap[data.User.Id] = data
+				userMap[data.User.Id].InternalState = internalState
+				userMapLock.Unlock()
 
-			SUBSCRIBE_VOICE_CHANNEL_SELECT := map[string]any{
-				"nonce": uuid.NewString(),
-				"evt":   "VOICE_CHANNEL_SELECT",
-				"cmd":   "SUBSCRIBE",
 			}
-			conn.WriteJSON(SUBSCRIBE_VOICE_CHANNEL_SELECT)
+			NotifyUpdate()
 
-			GET_VOICE_CHANNEL_SELECT := map[string]any{
-				"nonce": uuid.NewString(),
-				"cmd":   "GET_SELECTED_VOICE_CHANNEL",
+		case *UserIdInfo:
+			switch payload.Evt {
+			case EventSpeakingStart:
+				userMapLock.Lock()
+				if _, ok := userMap[data.UserId]; ok {
+					userMap[data.UserId].Talking = true
+				}
+				userMapLock.Unlock()
+			case EventSpeakingStop:
+				userMapLock.Lock()
+				if _, ok := userMap[data.UserId]; ok {
+					userMap[data.UserId].Talking = false
+				}
+				userMapLock.Unlock()
 			}
-			conn.WriteJSON(GET_VOICE_CHANNEL_SELECT)
-		case "AUTHORIZE":
-			code := m["data"].(map[string]any)["code"].(string)
-			token := RemoteLogin(code)
-			os.WriteFile("token.txt", []byte(token), os.ModePerm)
+			NotifyUpdate()
 
-			AUTHENTICATE := map[string]any{
-				"cmd": "AUTHENTICATE",
-				"args": map[string]any{
-					"access_token": token,
-				},
-				"nonce": uuid.NewString(),
-			}
-			conn.WriteJSON(AUTHENTICATE)
-		case "DISPATCH":
-			switch evt {
-			case "VOICE_STATE_DELETE":
-				var data UserState
-				err := mapstructure.Decode(m["data"], &data)
-				fmt.Println(err, "VOICE_STATE_DELETE", data)
-				userMapLock.Lock()
-				delete(userMap, data.User.Id)
-				userMapLock.Unlock()
-				NotifyUpdate()
-			case "VOICE_STATE_CREATE":
-				var data UserState
-				err := mapstructure.Decode(m["data"], &data)
-				fmt.Println(err, "VOICE_STATE_CREATE", data)
-				userMapLock.Lock()
-				userMap[data.User.Id] = &data
-				userMapLock.Unlock()
-				NotifyUpdate()
-			case "VOICE_STATE_UPDATE":
-				var data UserState
-				err := mapstructure.Decode(m["data"], &data)
-				fmt.Println(err, "VOICE_STATE_UPDATE", data)
-				userMapLock.Lock()
-				userMap[data.User.Id] = &data
-				userMapLock.Unlock()
-				NotifyUpdate()
-			case "SPEAKING_START":
-				s := m["data"].(map[string]any)["user_id"].(string)
-				userMapLock.Lock()
-				if _, ok := userMap[s]; ok {
-					userMap[s].VoiceState.Talking = true
-				}
-				userMapLock.Unlock()
-				NotifyUpdate()
-			case "VOICE_CHANNEL_SELECT":
-				if currentChannel != "" {
-					for _, sub := range subs {
-						SUBSCRIBE := map[string]any{
-							"nonce": uuid.NewString(),
-							"evt":   sub,
-							"args": map[string]any{
-								"channel_id": currentChannel,
-							},
-							"cmd": "UNSUBSCRIBE",
-						}
-						conn.WriteJSON(SUBSCRIBE)
-					}
-
-					currentChannel = ""
-				}
-				userMapLock.Lock()
-				userMap = map[string]*UserState{}
-				userMapLock.Unlock()
-				currentChannel = m["data"].(map[string]any)["channel_id"].(string)
-				GET_VOICE_CHANNEL_SELECT := map[string]any{
-					"nonce": uuid.NewString(),
-					"cmd":   "GET_SELECTED_VOICE_CHANNEL",
-				}
-				conn.WriteJSON(GET_VOICE_CHANNEL_SELECT)
-			case "SPEAKING_STOP":
-				s := m["data"].(map[string]any)["user_id"].(string)
-				userMapLock.Lock()
-				if _, ok := userMap[s]; ok {
-					userMap[s].VoiceState.Talking = false
-				}
-				userMapLock.Unlock()
-				NotifyUpdate()
-			case "READY":
-				if file == nil {
-					conn.WriteJSON(Authorize{
-						Nonce: uuid.NewString(),
-						Cmd:   "AUTHORIZE",
-						AuthorizeArgs: AuthorizeArgs{
-							ClientId: clientID,
-							Scopes:   []string{"identify", "rpc"},
-						},
-					})
-				} else {
-					AUTHENTICATE := map[string]any{
-						"cmd": "AUTHENTICATE",
-						"args": map[string]any{
-							"access_token": string(file),
-						},
-						"nonce": uuid.NewString(),
-					}
-					conn.WriteJSON(AUTHENTICATE)
-				}
-			}
 		}
 	}
-}
-
-func StringOr(s any, or string) string {
-	if s, ok := s.(string); ok {
-		return s
-	}
-	return or
 }
 
 func NotifyUpdate() {
@@ -319,6 +287,36 @@ func NotifyUpdate() {
 		<-stateUpdated
 	}
 	stateUpdated <- time.Now()
+}
+
+var longUpdateLock sync.Mutex
+
+func NotifyLongUpdate(userId string) {
+	go func() {
+		longUpdateLock.Lock()
+		defer longUpdateLock.Unlock()
+		ticker := time.NewTicker(time.Millisecond * 1)
+		for {
+			for len(stateUpdated) > 0 {
+				<-stateUpdated
+			}
+
+			stateUpdated <- time.Now()
+			<-ticker.C
+			userMapLock.Lock()
+			if user, ok := userMap[userId]; ok {
+				userMapLock.Unlock()
+				if user.Left || user.Joined {
+					continue
+				}
+			} else {
+				userMapLock.Unlock()
+			}
+			break
+		}
+
+		ticker.Stop()
+	}()
 }
 
 func RemoteLogin(code string) string {
@@ -341,10 +339,6 @@ func StrToUnsafePointer(ostr string) uintptr {
 	return uintptr(unsafe.Pointer(str))
 }
 
-// --------------------------
-// 與 GDI+、User32 相關的 DLL 與函數宣告
-// --------------------------
-
 var gdiplusDLL = syscall.NewLazyDLL("gdiplus.dll")
 var user32DLL = syscall.NewLazyDLL("user32.dll")
 var gdipLoadImageFromStream = gdiplusDLL.NewProc("GdipLoadImageFromStream")
@@ -355,10 +349,6 @@ var gdipGraphicsClear = gdiplusDLL.NewProc("GdipGraphicsClear")
 var gdipDeleteGraphics = gdiplusDLL.NewProc("GdipDeleteGraphics")
 var gdipDisposeImage = gdiplusDLL.NewProc("GdipDisposeImage")
 var gdipFree = gdiplusDLL.NewProc("GdipFree")
-
-// --------------------------
-// LoopImage 函式：處理圖片更新與繪圖，同時根據 DPI 縮放
-// --------------------------
 
 func LoopImage() {
 	// 建立暫存資料夾
@@ -387,13 +377,20 @@ func LoopImage() {
 	taskBarWND := win.HWND(taskBar)
 	hStart, _, _ := findWindowExW.Call(uintptr(taskBar), 0, StrToUnsafePointer("Start"), 0)
 	hStartWND := win.HWND(hStart)
+	hTrayNotify, _, _ := findWindowExW.Call(uintptr(taskBar), 0, StrToUnsafePointer("TrayNotifyWnd"), 0)
+	hTrayNotifyWND := win.HWND(hTrayNotify)
+
+	targetHWND := hStartWND
+	if targetHWND.GetWindowRect().Left == 0 {
+		targetHWND = hTrayNotifyWND
+	}
 
 	// 取得 GetDpiForWindow 函數（Windows 10 以上可用）
 	getDpiForWindow := user32DLL.NewProc("GetDpiForWindow")
 
 	windowMain := ui.NewWindowMain(
 		ui.WindowMainOpts().WndStyles(co.WS_POPUP | co.WS_SYSMENU).
-			WndExStyles(co.WS_EX_TOOLWINDOW | co.WS_EX_TOPMOST).
+			WndExStyles(co.WS_EX_TOOLWINDOW | co.WS_EX_TOPMOST | co.WS_EX_LAYERED).
 			HBrushBkgnd(win.HBRUSH(0)),
 	)
 
@@ -401,8 +398,6 @@ func LoopImage() {
 	windowMain.On().WmCreate(func(p wm.Create) int {
 		windowMain.Hwnd().SetParent(taskBarWND)
 
-		exstyle := co.WS_EX(windowMain.Hwnd().GetWindowLongPtr(co.GWLP_EXSTYLE))
-		windowMain.Hwnd().SetWindowLongPtr(co.GWLP_EXSTYLE, uintptr(exstyle|co.WS_EX_LAYERED))
 		windowMain.Hwnd().SetLayeredWindowAttributes(win.RGB(0, 0, 0), 0, co.LWA_COLORKEY)
 		windowMain.Hwnd().ShowWindow(co.SW_SHOW)
 
@@ -410,10 +405,13 @@ func LoopImage() {
 		dpi, _, _ := getDpiForWindow.Call(uintptr(windowMain.Hwnd()))
 		scale = float64(dpi) / 96.0
 
-		hLeft := hStartWND.GetWindowRect().Left
+		hLeft := targetHWND.GetWindowRect().Left
 		// 原本固定寬度 50 與高度 48，乘上 scale 進行縮放
 		scaledWidth := int32(50 * scale)
 		scaledHeight := int32(48 * scale)
+		if err := loadFont(48 * scale); err != nil {
+			log.Println(err)
+		}
 		windowMain.Hwnd().MoveWindow(hLeft-scaledWidth, 0, scaledWidth, scaledHeight, true)
 		return 0
 	})
@@ -424,146 +422,46 @@ func LoopImage() {
 	})
 
 	var imgPtr uintptr
-	var avatarList []string
-	lastMemberCount := 0
-	userImageMap := map[string]image.Image{}
-	userImageLock := sync.Mutex{}
-	downloading := []string{}
-	needGreen := []string{}
-	needRed := []string{}
-	needRedBackground := []string{}
 
 	buffer := new(bytes.Buffer)
-	hLeft := hStartWND.GetWindowRect().Left
+	hLeft := targetHWND.GetWindowRect().Left
 	clearColor := gdiplus.MakeARGB(0, 0, 0, 0)
 
+	var lastBound image.Rectangle
 	// WM_PAINT：根據縮放因子調整所有尺寸
 	windowMain.On().WmPaint(func() {
 		runtime.LockOSThread()
 
 		windowMain.RunUiThread(func() {
-			avatarSize := int(48 * scale)
-			gap := int(2 * scale)
-			totalWidth := (avatarSize + gap) * len(avatarList)
-			output := image.NewRGBA(image.Rect(0, 0, totalWidth, avatarSize))
-
-			buffer.Reset()
-			avatarList = nil
-			needRed = nil
-			needGreen = nil
-			needRedBackground = nil
-			userMapLock.Lock()
-			for _, user := range userMap {
-				pat := "avatars/" + user.User.Id + "-" + user.User.Avatar + ".png"
-				if _, err := os.Stat(pat); errors.Is(err, os.ErrNotExist) && !slices.Contains(downloading, pat) {
-					go func() {
-						resp, err := http.Get("https://cdn.discordapp.com/avatars/" + user.User.Id + "/" + user.User.Avatar + ".png?size=128")
-						if err != nil {
-							return
-						}
-						file, err := os.Create(pat)
-						if err != nil {
-							return
-						}
-						r := io.TeeReader(resp.Body, file)
-						if err != nil {
-							return
-						}
-						userImageLock.Lock()
-						img, err := png.Decode(r)
-
-						scaledImg := image.NewRGBA(image.Rect(0, 0, avatarSize, avatarSize))
-						draw2.CatmullRom.Scale(scaledImg, scaledImg.Bounds(), img, img.Bounds(), draw.Over, nil)
-
-						userImageMap[pat] = scaledImg
-						userImageLock.Unlock()
-					}()
-					continue
-				}
-				if user.Mute {
-					continue
-				}
-				if user.VoiceState.Talking {
-					needGreen = append(needGreen, pat)
-				}
-				if user.VoiceState.Mute || user.VoiceState.SelfMute || user.VoiceState.Deaf || user.VoiceState.SelfDeaf {
-					needRed = append(needRed, pat)
-				}
-				if user.VoiceState.Deaf || user.VoiceState.SelfDeaf {
-					needRedBackground = append(needRedBackground, pat)
-				}
-				avatarList = append(avatarList, pat)
-			}
-			for _, s := range avatarList {
-				if _, ok := userImageMap[s]; ok {
-					continue
-				}
-				if _, err := os.Stat(s); err != nil {
-					continue
-				}
-				file, err := os.Open(s)
-				if err != nil {
-					continue
-				}
-				img, err := png.Decode(file)
-				if err != nil {
-					continue
-				}
-
-				scaledImg := image.NewRGBA(image.Rect(0, 0, avatarSize, avatarSize))
-				draw2.CatmullRom.Scale(scaledImg, scaledImg.Bounds(), img, img.Bounds(), draw.Over, nil)
-
-				userImageMap[s] = scaledImg
-			}
-			userMapLock.Unlock()
 
 			if imgPtr != 0 {
 				_, _, _ = gdipDisposeImage.Call(imgPtr)
 			}
+			buffer.Reset()
 
-			if len(avatarList) == 0 {
-				time.Sleep(50 * time.Millisecond)
-				return
-			}
+			var imgList []image.Image
+			userMapLock.Lock()
+			userKey := slices.Collect(maps.Keys(userMap))
+			slices.Sort(userKey)
 
-			// 使用 DPI 縮放調整尺寸：原本固定 48 與 2，乘上 scale 得到 avatarSize 與間隔 gap
-			sort.Strings(avatarList)
-			for i, s := range avatarList {
-				if _, ok := userImageMap[s]; !ok {
+			for _, s := range userKey {
+				state := userMap[s]
+				if state.Left && state.LeftTick <= -messageDuration && state.StateImage == nil {
+					delete(userMap, s)
 					continue
 				}
-				img := userImageMap[s]
-				// 創建一個圓形遮罩（依據縮放後的尺寸）
-				mask := image.NewAlpha(image.Rect(0, 0, avatarSize, avatarSize))
-				for y := 0; y < avatarSize; y++ {
-					for x := 0; x < avatarSize; x++ {
-						dx := float64(x) - float64(avatarSize)/2
-						dy := float64(y) - float64(avatarSize)/2
-						if math.Sqrt(dx*dx+dy*dy) <= float64(avatarSize)/2 {
-							mask.SetAlpha(x, y, color.Alpha{255})
-						}
-					}
+				avatar, ok := <-getAvatar(state)
+				if !ok {
+					continue
 				}
 
-				// 將圖片與遮罩繪製到 output 上
-				destRect := image.Rect(i*(avatarSize+gap), 0, i*(avatarSize+gap)+avatarSize, avatarSize)
-				draw.DrawMask(output, destRect, img, image.Point{}, mask, image.Point{}, draw.Over)
-
-				if slices.Contains(needRed, s) {
-					// 畫紅色邊框
-					drawCircle(output, i*(avatarSize+gap), 0, avatarSize, color.RGBA{237, 66, 69, 255})
-				}
-				if slices.Contains(needGreen, s) {
-					// 畫綠色邊框
-					drawCircle(output, i*(avatarSize+gap), 0, avatarSize, color.RGBA{87, 242, 135, 255})
-				}
-				if slices.Contains(needRedBackground, s) {
-					// 畫較粗的紅色邊框
-					drawCircleBold(output, i*(avatarSize+gap), 0, avatarSize, color.RGBA{237, 66, 69, 255})
-				}
+				imgList = append(imgList, getPaintedAvatar(state, avatar))
 			}
+			userMapLock.Unlock()
 
-			_ = png.Encode(buffer, output)
+			merged := mergeImages(imgList)
+
+			_ = png.Encode(buffer, merged)
 			memory, err := createIStreamFromMemory(buffer.Bytes())
 			if err != nil {
 				fmt.Println(err)
@@ -576,10 +474,12 @@ func LoopImage() {
 			)
 			memory.Release()
 
-			if hLeft != hStartWND.GetWindowRect().Left || lastMemberCount != len(avatarList) {
-				hLeft = hStartWND.GetWindowRect().Left
-				lastMemberCount = len(avatarList)
-				windowMain.Hwnd().MoveWindow(hLeft-int32(float64(50*len(avatarList))*scale), 0, int32(float64(50*len(avatarList))*scale), int32(48*scale), true)
+			bounds := merged.Bounds()
+			if hLeft != targetHWND.GetWindowRect().Left || bounds != lastBound {
+				hLeft = targetHWND.GetWindowRect().Left
+				lastBound = bounds
+
+				windowMain.Hwnd().MoveWindow(hLeft-int32(float64(bounds.Dx())), 0, int32(float64(bounds.Dx())), int32(float64(bounds.Dy())), true)
 			}
 
 			var ps win.PAINTSTRUCT
@@ -677,4 +577,275 @@ func drawCircleBold(dst draw.Image, x, y, diameter int, clr color.Color) {
 			dst.Set(centerX+int(dx), centerY+int(dy), clr)
 		}
 	}
+}
+
+func resizeImage(targetSize float64, img image.Image) *image.RGBA {
+	avatarSize := int(targetSize * scale)
+	scaledImg := image.NewRGBA(image.Rect(0, 0, avatarSize, avatarSize))
+	xdraw.CatmullRom.Scale(scaledImg, scaledImg.Bounds(), img, img.Bounds(), draw.Over, nil)
+
+	return scaledImg
+}
+
+// darkenImage 將圖片中每個像素的 RGB 值乘上 factor (例如 0.5) 來變暗
+func darkenImage(img image.Image, factor float64) *image.RGBA {
+	bounds := img.Bounds()
+	darkened := image.NewRGBA(bounds)
+	for y := bounds.Min.Y; y < bounds.Max.Y; y++ {
+		for x := bounds.Min.X; x < bounds.Max.X; x++ {
+			// 取得原始像素顏色
+			originalColor := img.At(x, y)
+			r, g, b, a := originalColor.RGBA()
+
+			// 由於 RGBA() 回傳的值範圍是 0~65535，
+			// 所以先轉換到 0~255（右移 8 位元），再乘上暗化因子
+			dr := uint8(float64(r>>8) * factor)
+			dg := uint8(float64(g>>8) * factor)
+			db := uint8(float64(b>>8) * factor)
+			da := uint8(a >> 8)
+
+			// 設定新的像素值
+			darkened.Set(x, y, color.RGBA{R: dr, G: dg, B: db, A: da})
+		}
+	}
+	return darkened
+}
+
+func mergeImages(imgList []image.Image) *image.RGBA {
+	// 計算合併後圖片的總寬度和最大高度
+	totalWidth := 0
+	maxHeight := 0
+	for _, img := range imgList {
+		bounds := img.Bounds()
+		totalWidth += bounds.Dx() // 累加寬度
+		if bounds.Dy() > maxHeight {
+			maxHeight = bounds.Dy() // 取得最大高度
+		}
+	}
+
+	// 建立一張新的 RGBA 圖片作為合併後的結果
+	merged := image.NewRGBA(image.Rect(0, 0, totalWidth, maxHeight))
+
+	// 設定每張圖片放置的偏移位置
+	offsetX := 0
+	for _, img := range imgList {
+		bounds := img.Bounds()
+		// 設定來源與目的區域（這裡直接從 (0,0) 複製整張圖片）
+		dstRect := image.Rect(offsetX, 0, offsetX+bounds.Dx(), bounds.Dy())
+		draw.Draw(merged, dstRect, img, bounds.Min, draw.Over)
+		offsetX += bounds.Dx() // 更新偏移量
+	}
+	return merged
+}
+
+var deafImage *image.RGBA
+var muteImage *image.RGBA
+
+func getPaintedAvatar(userState *UserState, oImg *image.RGBA) *image.RGBA {
+	oImg = resizeImage(48, oImg)
+
+	if deafImage == nil {
+		deafImg, _, _ := image.Decode(bytes.NewReader(deafData))
+		deafImage = resizeImage(32, deafImg)
+	}
+	if muteImage == nil {
+		muteImg, _, _ := image.Decode(bytes.NewReader(muteData))
+		muteImage = resizeImage(32, muteImg)
+	}
+	imgSize := oImg.Bounds().Dx()
+	// 創建一個圓形遮罩（依據縮放後的尺寸）
+	mask := image.NewAlpha(oImg.Bounds())
+	for y := 0; y < imgSize; y++ {
+		for x := 0; x < imgSize; x++ {
+			dx := float64(x) - float64(imgSize)/2
+			dy := float64(y) - float64(imgSize)/2
+			if math.Sqrt(dx*dx+dy*dy) <= float64(imgSize)/2 {
+				mask.SetAlpha(x, y, color.Alpha{255})
+			}
+		}
+	}
+
+	img := image.NewRGBA(oImg.Bounds())
+
+	draw.DrawMask(img, img.Bounds(), oImg, image.Point{}, mask, image.Point{}, draw.Over)
+
+	if userState.VoiceState.Mute || userState.VoiceState.SelfMute {
+		img = darkenImage(img, 0.5)
+		draw.Draw(img, img.Bounds(), muteImage, image.Pt(-9, -9), draw.Over)
+		drawCircle(img, 0, 0, imgSize, color.RGBA{237, 66, 69, 255})
+	}
+
+	if userState.VoiceState.Deaf || userState.VoiceState.SelfDeaf {
+		img = darkenImage(img, 0.5)
+		draw.Draw(img, img.Bounds(), deafImage, image.Pt(-9, -9), draw.Over)
+		drawCircle(img, 0, 0, imgSize, color.RGBA{237, 66, 69, 255})
+	}
+
+	if userState.Talking {
+		drawCircle(img, 0, 0, imgSize, color.RGBA{87, 242, 135, 255})
+	}
+
+	if userState.Left && userState.StateImage != nil {
+		img = darkenImage(img, 0.8)
+
+		stateImage := userState.StateImage
+
+		if userState.LeftTick >= 0 {
+			progress := float64(messageDuration-userState.LeftTick) / float64(messageDuration)
+			visibleWidth := int(progress * float64(stateImage.Bounds().Dx()))
+			rect := image.Rect(stateImage.Bounds().Dx()-visibleWidth, 0, stateImage.Bounds().Dx(), stateImage.Bounds().Dy())
+			frame := stateImage.SubImage(rect)
+
+			img = mergeImages([]image.Image{img, frame})
+		} else {
+			stateImage = mergeImages([]image.Image{img, stateImage})
+
+			progress := float64(-userState.LeftTick) / float64(messageDuration)
+			visibleWidth := stateImage.Bounds().Dx() - int(progress*float64(stateImage.Bounds().Dx()))
+			rect := image.Rect(0, 0, visibleWidth, stateImage.Bounds().Dy())
+			img = stateImage.SubImage(rect).(*image.RGBA)
+		}
+
+		userState.LeftTick -= 1
+		if userState.LeftTick <= -messageDuration {
+			userState.StateImage = nil
+		}
+	}
+
+	if userState.Joined && userState.StateImage != nil {
+		stateImage := userState.StateImage
+
+		var rect image.Rectangle
+		if userState.JoinTick >= 0 {
+			progress := float64(messageDuration-userState.JoinTick) / float64(messageDuration)
+			visibleWidth := int(progress * float64(stateImage.Bounds().Dx()))
+			rect = image.Rect(stateImage.Bounds().Dx()-visibleWidth, 0, stateImage.Bounds().Dx(), stateImage.Bounds().Dy())
+		} else {
+			progress := float64(-userState.JoinTick) / float64(messageDuration)
+			visibleWidth := stateImage.Bounds().Dx() - int(progress*float64(stateImage.Bounds().Dx()))
+			rect = image.Rect(0, 0, visibleWidth, stateImage.Bounds().Dy())
+		}
+
+		frame := stateImage.SubImage(rect)
+
+		img = mergeImages([]image.Image{img, frame})
+		userState.JoinTick -= 1
+
+		if userState.JoinTick <= -messageDuration {
+			userState.Joined = false
+			userState.StateImage = nil
+		}
+	}
+
+	return img
+}
+
+func getAvatar(userState *UserState) <-chan *image.RGBA {
+	imgChan := make(chan *image.RGBA, 1)
+	if userState.CachedImage != nil {
+		imgChan <- userState.CachedImage
+		return imgChan
+	}
+
+	avatarPath := "avatars/" + userState.User.Id + "-" + userState.User.Avatar + ".png"
+	avatarURL := "https://cdn.discordapp.com/avatars/" + userState.User.Id + "/" + userState.User.Avatar + ".png?size=128"
+	if userState.User.Avatar == "" {
+		i, _ := strconv.ParseInt(userState.User.Id, 10, 64)
+		avatarPath = fmt.Sprintf("avatars/default-%d.png", (i>>22)%6)
+		avatarURL = fmt.Sprintf("https://cdn.discordapp.com/embed/avatars/%d.png", (i>>22)%6)
+	}
+
+	file, err := os.ReadFile(avatarPath)
+	if err == nil {
+		img, _, err := image.Decode(bytes.NewReader(file))
+		if err == nil {
+			userState.CachedImage = resizeImage(48, img)
+			imgChan <- userState.CachedImage
+			return imgChan
+		}
+	}
+
+	go func() {
+		resp, err := http.Get(avatarURL)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		file, err = io.ReadAll(resp.Body)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		img, _, err := image.Decode(bytes.NewReader(file))
+		if err != nil {
+			log.Println(err)
+			return
+		}
+
+		err = os.WriteFile(avatarPath, file, os.ModePerm)
+		if err != nil {
+			log.Println(err)
+			return
+		}
+		userState.CachedImage = resizeImage(48, img)
+		imgChan <- userState.CachedImage
+		NotifyUpdate()
+	}()
+
+	return imgChan
+}
+
+var fontFace font.Face
+
+// loadFont 讀取 TTF 檔案並返回一個字型面孔（face）
+func loadFont(fontSize float64) error {
+	// 解析字體檔案
+	f, err := truetype.Parse(fontData)
+	if err != nil {
+		return fmt.Errorf("解析字體失敗: %v", err)
+	}
+	// 建立字型面孔
+	fontFace = truetype.NewFace(f, &truetype.Options{
+		Size:    fontSize,
+		DPI:     72,
+		Hinting: font.HintingFull,
+	})
+	return nil
+}
+
+// drawTextWithFont 使用指定字型在圖片上繪製文本
+func drawTextWithFont(img *image.RGBA, x, y int, text string, face font.Face) {
+	col := color.RGBA{R: 255, G: 255, B: 255, A: 255} // 白色字
+	point := fixed.Point26_6{
+		X: fixed.I(x),
+		Y: fixed.I(y),
+	}
+	d := &font.Drawer{
+		Dst:  img,
+		Src:  image.NewUniform(col),
+		Face: face,
+		Dot:  point,
+	}
+	d.DrawString(text)
+}
+
+func getTextedImage(text string) *image.RGBA {
+	if err := loadFont(48 * scale); err != nil {
+		log.Println(err)
+	}
+	drawer := &font.Drawer{
+		Face: fontFace,
+	}
+
+	boundsFixed := drawer.MeasureString(text)
+	width := boundsFixed.Ceil()
+	height := int(48 * scale)
+
+	src := image.NewRGBA(image.Rect(0, 0, width+50, height))
+
+	drawTextWithFont(src, 5, height-10, text, fontFace)
+
+	return src
 }

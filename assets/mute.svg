@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"
+     style="width:100%;height:100%;transform:translate3d(0,0,0);content-visibility:visible" viewBox="0 0 24 24">
+    <defs>
+        <clipPath id="a">
+            <path d="M0 0h24v24H0z"/>
+        </clipPath>
+        <clipPath id="b">
+            <path d="M0 0h600v600H0z"/>
+        </clipPath>
+        <clipPath id="f">
+            <path d="M0 0h1000v1000H0z"/>
+        </clipPath>
+        <clipPath id="e">
+            <path d="M0 0h1000v1000H0z"/>
+        </clipPath>
+        <clipPath id="c">
+            <path d="M0 0h1000v1000H0z"/>
+        </clipPath>
+        <mask id="d">
+            <path fill="#fff" d="M200 200h600v600H200z"/>
+            <path d="M681.2199707 212.79600525 215.69700623 681.75s-63.93701172 67.48199463-14.56001282 117.11199951C255 853 319.67999268 785.05603027 319.67999268 785.05603027l465.52301025-468.95404052S868 234 816.21502686 184.44599915c-51.434021-49.21800232-134.99505616 28.3500061-134.99505616 28.3500061"/>
+            <path fill="#fff" d="M698 405h-56v74h56v-74"/>
+        </mask>
+    </defs>
+    <g clip-path="url(#a)">
+        <g clip-path="url(#b)" style="display:block" transform="matrix(.04 0 0 .04 0 0)">
+            <g clip-path="url(#c)" style="display:block" transform="translate(-200 -200)">
+                <g mask="url(#d)" style="display:block">
+                    <path fill="#f04747"
+                          d="M600 348.99999905c0-55.2249968-44.77499723-100-100-100s-100 44.7750032-100 100V448c0 55.22500277 44.77499723 100 100 100s100-44.77499723 100-100v-99.00000095z"/>
+                    <path fill="none" stroke="#f04747" stroke-linecap="round" stroke-width="50"
+                          d="M675 448c0 96.64999992-78.35000157 175-175 175s-175-78.35000008-175-175"/>
+                    <path fill="#f04747"
+                          d="M525 623c0-6.90000057-5.59999943-12.5-12.5-12.5h-25c-6.90000057 0-12.5 5.59999943-12.5 12.5v100c0 6.90000057 5.59999943 12.5 12.5 12.5h25c6.90000057 0 12.5-5.59999943 12.5-12.5V623z"/>
+                    <path fill="#f04747"
+                          d="M425 698c-13.80000114 0-25 11.20000035-25 25s11.19999886 25 25 25h150c13.80000114 0 25-11.20000035 25-25s-11.19999886-25-25-25H425z"/>
+                </g>
+            </g>
+            <g clip-path="url(#f)" style="display:block" transform="translate(-200 -200)">
+                <path fill="none" stroke="#f04747" stroke-linecap="round" stroke-width="2" d="m-10 10 20-20"
+                      style="display:block" transform="matrix(25 0 0 25 500 500)"/>
+            </g>
+        </g>
+    </g>
+</svg>
