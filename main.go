@@ -227,8 +227,8 @@ func main() {
 				userMapLock.Lock()
 				userMap[data.User.Id].Left = true
 				userMap[data.User.Id].LeftTick = messageDuration
-				messageImg := getTextedImage(fmt.Sprintf("離開"))
-				userMap[data.User.Id].StateImage = messageImg
+				//messageImg := getTextedImage(fmt.Sprintf("離開"))
+				//userMap[data.User.Id].StateImage = messageImg
 				userMapLock.Unlock()
 				NotifyLongUpdate(data.User.Id)
 			case EventVoiceStateCreate:
@@ -244,8 +244,8 @@ func main() {
 				userMap[data.User.Id].Joined = true
 				userMap[data.User.Id].JoinTick = messageDuration
 
-				messageImg := getTextedImage(fmt.Sprintf("加入"))
-				userMap[data.User.Id].StateImage = messageImg
+				//messageImg := getTextedImage(fmt.Sprintf("加入"))
+				//userMap[data.User.Id].StateImage = messageImg
 				userMapLock.Unlock()
 				NotifyLongUpdate(data.User.Id)
 			case EventVoiceStateUpdate:
